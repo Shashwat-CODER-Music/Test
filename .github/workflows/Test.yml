@@ -1,40 +1,41 @@
-name: Build and Deploy React App
-
+name: Download YouTube Audio and Upload to Internet Archive
 on:
-  push:
-    branches:
-      - main # or the default branch you want to trigger on
+  schedule:
+    - cron: '0 */3 * * *'  # Runs every 3 hours (00:00, 03:00, 06:00, etc. UTC)
+  workflow_dispatch:  # Allows manual trigger
+
+permissions:
+  contents: write  # ✅ Allows pushing changes to the repo
 
 jobs:
-  build:
+  download-upload-audio:
     runs-on: ubuntu-latest
     steps:
-    
-      # Checkout the code
       - name: Checkout repository
         uses: actions/checkout@v3
-      
-      # Set up Node.js
+        
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '16'  # specify the version of Node.js to use
-      
-      # Install dependencies
-      - name: Install dependencies
-        run: npm install
-      
-      # Build the React app
-      - name: Build the React app
-        run: npm run build
+          node-version: 20
+          
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Node.js dependencies
+        run: npm install axios fs-extra
 
-      # Commit the 'dist' folder to the repo
-      - name: Commit dist folder
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add dist
-          git commit -m "Add build dist folder"
-          git push origin main # Make sure to change the branch name if it's not 'main'
+      - name: Install Python dependencies
+        run: pip install internetarchive
+
+      - name: Create directories
+        run: mkdir -p temp_downloads
+
+      - name: Run download and upload script
+        run: node ./scripts/download_upload.js
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
+          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
+          IA_IDENTIFIER: akkidark
