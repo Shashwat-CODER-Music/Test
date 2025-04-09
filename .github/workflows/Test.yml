@@ -1,12 +1,10 @@
-name: Download YouTube Audio and Upload to Internet Archive
+name: Download YouTube Audio and Upload to Internet Archive v2
 on:
   schedule:
     - cron: '0 */3 * * *'  # Runs every 3 hours (00:00, 03:00, 06:00, etc. UTC)
   workflow_dispatch:  # Allows manual trigger
-
 permissions:
   contents: write  # ✅ Allows pushing changes to the repo
-
 jobs:
   download-upload-audio:
     runs-on: ubuntu-latest
@@ -26,13 +24,13 @@ jobs:
           
       - name: Install Node.js dependencies
         run: npm install axios fs-extra
-
+        
       - name: Install Python dependencies
         run: pip install internetarchive
-
+        
       - name: Create directories
         run: mkdir -p temp_downloads
-
+        
       - name: Run download and upload script
         run: node ./scripts/download_upload.js
         env:
