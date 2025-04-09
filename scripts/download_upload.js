@@ -35,79 +35,121 @@ if (fs.existsSync(DOWNLOADS_JSON)) {
 }
 
 /**
- * Upload a file to Internet Archive
- * @param {string} filePath Path to the file to upload
- * @param {string} videoId YouTube video ID
- * @param {string} title Video title
- * @returns {boolean} True if upload successful
+ * Upload multiple files to Internet Archive
+ * @param {Array} filesToUpload Array of {filePath, videoId, title} objects
+ * @returns {Array} Results with success/failure for each file
  */
-async function uploadToInternetArchive(filePath, videoId, title) {
-    try {
-        console.log(`📤 Uploading ${path.basename(filePath)} to Internet Archive...`);
-        
-        // Create Python script for upload
-        const pythonScript = `
+async function batchUploadToInternetArchive(filesToUpload) {
+    console.log(`📤 Batch uploading ${filesToUpload.length} files to Internet Archive...`);
+    
+    // Create Python script for batch upload
+    const pythonScript = `
 import os
 import sys
+import json
 import internetarchive
 
-# Get file info
-filepath = sys.argv[1]
-video_id = sys.argv[2]
-title = sys.argv[3]
-filename = os.path.basename(filepath)
+# Load batch data
+batch_data = json.loads(sys.argv[1])
 
 # Internet Archive credentials
 access_key = "${IA_ACCESS_KEY}"
 secret_key = "${IA_SECRET_KEY}"
 identifier = "${IA_IDENTIFIER}"
 
-# Upload file
-response = internetarchive.upload(
-    identifier=identifier,
-    files=[filepath],
-    metadata={
-        "title": title,
-        "mediatype": "audio",
-        "collection": "opensource_audio",
-        "creator": "YouTube Clone - ShradhaKD",
-        "youtube_id": video_id
-    },
-    config={
-        "s3": {
-            "access": access_key,
-            "secret": secret_key
-        }
-    },
-    verbose=True
-)
+# Process each file
+results = []
 
-# Check if successful
-success = True
-for r in response:
-    if r.status_code != 200:
-        print(f"❌ Upload failed with status {r.status_code}: {r.text}")
-        success = False
-    else:
-        print(f"✅ Successfully uploaded {filename}")
+for item in batch_data:
+    filepath = item["filePath"]
+    video_id = item["videoId"]
+    title = item["title"]
+    filename = os.path.basename(filepath)
+    
+    print(f"Uploading {filename}...")
+    
+    try:
+        response = internetarchive.upload(
+            identifier=identifier,
+            files=[filepath],
+            metadata={
+                "title": title,
+                "mediatype": "audio",
+                "collection": "opensource_audio",
+                "creator": "YouTube Clone - ShradhaKD",
+                "youtube_id": video_id
+            },
+            config={
+                "s3": {
+                    "access": access_key,
+                    "secret": secret_key
+                }
+            },
+            verbose=True
+        )
+        
+        success = True
+        for r in response:
+            if r.status_code != 200:
+                print(f"❌ Upload failed for {filename} with status {r.status_code}: {r.text}")
+                success = False
+            else:
+                print(f"✅ Successfully uploaded {filename}")
+        
+        results.append({
+            "videoId": video_id,
+            "success": success
+        })
+    except Exception as e:
+        print(f"❌ Exception uploading {filename}: {str(e)}")
+        results.append({
+            "videoId": video_id,
+            "success": False
+        })
 
-# Exit with appropriate code
-sys.exit(0 if success else 1)
+# Output results as JSON
+print(json.dumps(results))
 `;
 
-        const scriptPath = path.join(TEMP_DOWNLOAD_DIR, "upload_script.py");
+    try {
+        const scriptPath = path.join(TEMP_DOWNLOAD_DIR, "batch_upload_script.py");
         fs.writeFileSync(scriptPath, pythonScript);
         
-        // Run Python upload script
-        const result = spawnSync("python", [scriptPath, filePath, videoId, title], {
+        // Create JSON string of files to upload
+        const batchDataJson = JSON.stringify(filesToUpload);
+        
+        // Run Python upload script with batch data
+        const result = spawnSync("python", [scriptPath, batchDataJson], {
             encoding: "utf-8",
-            stdio: "inherit"
+            stdio: "pipe",
+            maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large output
         });
         
-        return result.status === 0;
+        if (result.status !== 0) {
+            console.error(`❌ Batch upload script failed: ${result.stderr}`);
+            return filesToUpload.map(item => ({ videoId: item.videoId, success: false }));
+        }
+        
+        // Try to parse results from the script output
+        try {
+            // Find and extract the JSON part from the output
+            const outputLines = result.stdout.split('\n');
+            const jsonLine = outputLines.filter(line => line.trim().startsWith('[')).pop();
+            
+            if (jsonLine) {
+                return JSON.parse(jsonLine);
+            } else {
+                console.error("❌ Could not find JSON results in script output");
+                return filesToUpload.map(item => ({ videoId: item.videoId, success: false }));
+            }
+        } catch (parseErr) {
+            console.error(`❌ Failed to parse upload results: ${parseErr.message}`);
+            console.log("Script output:", result.stdout);
+            return filesToUpload.map(item => ({ videoId: item.videoId, success: false }));
+        }
     } catch (err) {
-        console.error(`❌ Error uploading to Internet Archive: ${err.message}`);
-        return false;
+        console.error(`❌ Error in batch upload: ${err.message}`);
+        return filesToUpload.map(item => ({ videoId: item.videoId, success: false }));
     }
 }
 
@@ -146,7 +188,14 @@ function commitChangesToJson() {
         let processedCount = 0;
         let skippedCount = 0;
         let errorCount = 0;
+        
+        // Track downloaded files for batch upload
+        const downloadedFiles = [];
+        const failedIds = [];
 
+        // PHASE 1: DOWNLOAD ALL FILES
+        console.log(`\n📥 PHASE 1: DOWNLOADING ALL FILES`);
+        
         for (const videoId of videoIds) {
             const filename = `${videoId}.webm`;
             const filePath = path.join(TEMP_DOWNLOAD_DIR, filename);
@@ -158,24 +207,26 @@ function commitChangesToJson() {
                 continue;
             }
 
-            console.log(`🎵 Processing video ${videoId}...`);
+            console.log(`🎵 Downloading video ${videoId}...`);
 
-            let success = false;
+            let downloadSuccess = false;
+            let videoTitle = `Video ${videoId}`;
+            
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 try {
                     console.log(`🔄 Download attempt ${attempt}/${MAX_RETRIES}...`);
 
                     // Get the download URL and filename from the MP3 API
                     const downloadResponse = await axios.get(`${MP3_API}/${videoId}`);
-                    const { url, filename: videoTitle } = downloadResponse.data;
+                    const { url, filename: titleFromApi } = downloadResponse.data;
 
                     if (!url) {
                         throw new Error("No download URL returned from API");
                     }
 
                     // Clean up filename to use as title (remove .mp3 extension if present)
-                    const title = videoTitle 
-                        ? videoTitle.replace(/\.mp3$/, '').trim() 
+                    videoTitle = titleFromApi 
+                        ? titleFromApi.replace(/\.mp3$/, '').trim() 
                         : `Video ${videoId}`;
 
                     // Download the audio file
@@ -202,37 +253,19 @@ function commitChangesToJson() {
                     }
 
                     console.log(`✅ Downloaded ${filePath} (${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
-                    console.log(`📝 Title: ${title}`);
+                    console.log(`📝 Title: ${videoTitle}`);
 
-                    // Upload to Internet Archive
-                    const uploadSuccess = await uploadToInternetArchive(filePath, videoId, title);
+                    downloadedFiles.push({
+                        filePath: filePath,
+                        videoId: videoId,
+                        title: videoTitle,
+                        size: fileSize
+                    });
                     
-                    if (!uploadSuccess) {
-                        throw new Error("Failed to upload to Internet Archive");
-                    }
-
-                    // Update downloads.json with Internet Archive link
-                    const iaFilePath = `${IA_BASE_URL}${filename}`;
-                    downloadsData[videoId] = {
-                        title: title,
-                        id: videoId,
-                        filePath: iaFilePath,
-                        size: fileSize,
-                        uploadDate: new Date().toISOString()
-                    };
-
-                    fs.writeFileSync(DOWNLOADS_JSON, JSON.stringify(downloadsData, null, 2));
-                    console.log(`📝 Updated downloads.json with ${videoId}`);
-
-                    // Remove local file after upload
-                    fs.unlinkSync(filePath);
-                    console.log(`🗑️ Removed local file ${filePath}`);
-                    
-                    processedCount++;
-                    success = true;
+                    downloadSuccess = true;
                     break;
                 } catch (err) {
-                    console.error(`⚠️ Error processing ${videoId}: ${err.message}`);
+                    console.error(`⚠️ Error downloading ${videoId}: ${err.message}`);
                     
                     // Clean up partial download if it exists
                     if (fs.existsSync(filePath)) {
@@ -245,7 +278,8 @@ function commitChangesToJson() {
                     }
                     
                     if (attempt === MAX_RETRIES) {
-                        console.error(`❌ Failed after ${MAX_RETRIES} attempts, skipping.`);
+                        console.error(`❌ Failed to download ${videoId} after ${MAX_RETRIES} attempts, skipping.`);
+                        failedIds.push(videoId);
                         errorCount++;
                     }
                     
@@ -253,14 +287,69 @@ function commitChangesToJson() {
                 }
             }
 
-            if (!success) {
-                console.error(`🚨 Skipped: ${videoId} due to repeated errors.`);
+            if (!downloadSuccess) {
+                console.error(`🚨 Failed to download: ${videoId}`);
             }
         }
 
-        // Commit changes to downloads.json
-        if (processedCount > 0) {
-            commitChangesToJson();
+        // PHASE 2: BATCH UPLOAD ALL DOWNLOADED FILES
+        console.log(`\n📤 PHASE 2: BATCH UPLOADING ${downloadedFiles.length} FILES`);
+        
+        if (downloadedFiles.length > 0) {
+            // Batch upload all files
+            const uploadResults = await batchUploadToInternetArchive(downloadedFiles);
+            
+            // Process results and update downloads.json
+            for (const result of uploadResults) {
+                const { videoId, success } = result;
+                const fileInfo = downloadedFiles.find(file => file.videoId === videoId);
+                
+                if (success && fileInfo) {
+                    const filename = path.basename(fileInfo.filePath);
+                    const iaFilePath = `${IA_BASE_URL}${filename}`;
+                    
+                    // Update downloads.json
+                    downloadsData[videoId] = {
+                        title: fileInfo.title,
+                        id: videoId,
+                        filePath: iaFilePath,
+                        size: fileInfo.size,
+                        uploadDate: new Date().toISOString()
+                    };
+                    
+                    processedCount++;
+                    console.log(`✅ Successfully processed ${videoId}`);
+                } else {
+                    errorCount++;
+                    console.error(`❌ Failed to upload ${videoId}`);
+                }
+            }
+            
+            // Save updated downloads JSON
+            fs.writeFileSync(DOWNLOADS_JSON, JSON.stringify(downloadsData, null, 2));
+            console.log(`📝 Updated downloads.json with ${processedCount} new entries`);
+            
+            // Commit changes
+            if (processedCount > 0) {
+                commitChangesToJson();
+            }
+        } else {
+            console.log(`⏭️ No new files to upload`);
+        }
+
+        // PHASE 3: CLEANUP
+        console.log(`\n🧹 PHASE 3: CLEANING UP DOWNLOADED FILES`);
+        
+        // Clean up downloaded files
+        for (const fileInfo of downloadedFiles) {
+            try {
+                if (fs.existsSync(fileInfo.filePath)) {
+                    fs.unlinkSync(fileInfo.filePath);
+                    console.log(`🗑️ Removed ${path.basename(fileInfo.filePath)}`);
+                }
+            } catch (err) {
+                console.error(`⚠️ Error deleting ${fileInfo.filePath}: ${err.message}`);
+            }
         }
 
         console.log(`\n📊 Summary:`);
@@ -273,20 +362,20 @@ function commitChangesToJson() {
         console.error("❌ Error:", error.message);
         process.exit(1);
     } finally {
-        // Clean up any remaining files in temp directory
+        // Double-check and clean up any remaining files in temp directory
         try {
             const tempFiles = fs.readdirSync(TEMP_DOWNLOAD_DIR)
                 .filter(file => file.endsWith('.webm'));
             
             if (tempFiles.length > 0) {
-                console.log(`🧹 Cleaning up ${tempFiles.length} temporary files...`);
+                console.log(`🧹 Cleaning up ${tempFiles.length} remaining temporary files...`);
                 tempFiles.forEach(file => {
                     const filePath = path.join(TEMP_DOWNLOAD_DIR, file);
                     fs.unlinkSync(filePath);
                 });
             }
         } catch (err) {
-            console.error(`⚠️ Error during cleanup: ${err.message}`);
+            console.error(`⚠️ Error during final cleanup: ${err.message}`);
         }
     }
 })();
