@@ -10,8 +10,8 @@ const CHANNEL_API = "https://backendmix-emergeny.vercel.app/list";
 // Configuration
 const TEMP_DOWNLOAD_DIR = path.join(__dirname, "..", "temp_downloads");
 const DOWNLOADS_JSON = path.join(__dirname, "..", "downloads.json");
-const MAX_RETRIES = 3;
-const CHANNEL_ID = "UCyBzV_g6Vfv5GM3aMQb3Y_A"; // Hardcoded Channel ID
+const MAX_RETRIES = 5;
+const CHANNEL_ID = "UCn372MiubHTkPFwxKVv45LQ"; // Hardcoded Channel ID
 
 // Internet Archive configuration
 const IA_IDENTIFIER = "akkidark";
